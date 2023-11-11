@@ -1,11 +1,10 @@
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout
-from tensorflow.keras.models import Model
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout, Multiply, Reshape
+from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.callbacks import ModelCheckpoint
-from sklearn.svm import SVC  # 导入SVM
+from sklearn.svm import SVC
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_sample_weight
@@ -14,12 +13,22 @@ from elpv_reader import load_dataset
 from PIL import Image, ImageEnhance, ImageFilter
 import os
 
+# SE Block definition
+def se_block(input_feature, ratio=16):
+    channel_axis = -1
+    channel = input_feature.shape[channel_axis]
+    se_feature = GlobalAveragePooling2D()(input_feature)
+    se_feature = Reshape((1, 1, channel))(se_feature)
+    se_feature = Dense(channel // ratio, activation='relu')(se_feature)
+    se_feature = Dense(channel, activation='sigmoid')(se_feature)
+    return Multiply()([input_feature, se_feature])
+
 # Parameters
 data_csv_path = 'labels.csv'
 image_directory = './images'
 batch_size = 32
 target_size = (224, 224)
-num_epochs = 100
+num_epochs = 60
 num_classes = 4
 learning_rate = 0.0001
 
@@ -46,7 +55,7 @@ X_train, X_test, y_train, y_test = train_test_split(images, probs_mapped, test_s
 # Compute class weights
 sample_weights = compute_sample_weight(class_weight='balanced', y=y_train)
 
-# Preprocessing function for images
+# Preprocessing function for images with color jitter
 def preprocess_image(image):
     img = Image.fromarray(image)
     if img.mode == 'L':
@@ -54,6 +63,11 @@ def preprocess_image(image):
     img = ImageEnhance.Contrast(img).enhance(2)
     img = img.filter(ImageFilter.MedianFilter(size=3))
     img = img.resize(target_size)
+
+    # Apply color jitter
+    enhancer = ImageEnhance.Color(img)
+    img = enhancer.enhance(np.random.uniform(0.75, 1.25))
+
     img_array = np.array(img) / 255.0
     return img_array
 
@@ -65,9 +79,17 @@ X_test = np.array([preprocess_image(img) for img in X_test])
 y_train = tf.keras.utils.to_categorical(y_train, num_classes)
 y_test = tf.keras.utils.to_categorical(y_test, num_classes)
 
-# Define ResNet50 model
+# Define modified ResNet50 model with SE blocks
 base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(target_size[0], target_size[1], 3))
+
+# Unfreeze layers for fine-tuning
+for layer in base_model.layers:
+    layer.trainable = True
+
 x = base_model.output
+for layer in base_model.layers:
+    x = se_block(layer.output)
+
 x = GlobalAveragePooling2D()(x)
 x = BatchNormalization()(x)
 x = Dropout(0.5)(x)
@@ -86,10 +108,7 @@ checkpoint = ModelCheckpoint('best_model.h5', monitor='val_loss', verbose=1, sav
 model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), loss='categorical_crossentropy', metrics=['accuracy'])
 
 # Train model with the checkpoint callback
-try:
-    history = model.fit(X_train, y_train, epochs=num_epochs, validation_data=(X_test, y_test), sample_weight=sample_weights, callbacks=[checkpoint])
-except Exception as e:
-    print('Exception occurred: ', str(e))
+history = model.fit(X_train, y_train, epochs=num_epochs, validation_data=(X_test, y_test), sample_weight=sample_weights, callbacks=[checkpoint])
 
 # Save the final model
 model.save('final_model.h5')
@@ -127,7 +146,7 @@ plt.legend(['Train', 'Test'], loc='upper left')
 
 plt.show()
 
-# SVM 分类器
+# SVM Classifier
 # Feature extraction for SVM
 feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv5_block3_out').output)
 

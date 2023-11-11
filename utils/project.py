@@ -2,10 +2,11 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout, Multiply, Reshape
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ModelCheckpoint
-from sklearn.svm import SVC  # 导入SVM
+from tensorflow.keras.regularizers import l1_l2
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_sample_weight
@@ -19,9 +20,9 @@ data_csv_path = 'labels.csv'
 image_directory = './images'
 batch_size = 32
 target_size = (224, 224)
-num_epochs = 100
+num_epochs = 75
 num_classes = 4
-learning_rate = 0.0001
+learning_rate = 0.00005
 
 # Load dataset
 images, proba, types = load_dataset()
@@ -41,7 +42,7 @@ def map_probability_to_class(prob):
 probs_mapped = np.array([map_probability_to_class(prob) for prob in proba])
 
 # Split data
-X_train, X_test, y_train, y_test = train_test_split(images, probs_mapped, test_size=0.25, stratify=probs_mapped)
+X_train, X_test, y_train, y_test = train_test_split(images, probs_mapped, test_size=0.25, stratify=probs_mapped, random_state=None)
 
 # Compute class weights
 sample_weights = compute_sample_weight(class_weight='balanced', y=y_train)
@@ -65,16 +66,18 @@ X_test = np.array([preprocess_image(img) for img in X_test])
 y_train = tf.keras.utils.to_categorical(y_train, num_classes)
 y_test = tf.keras.utils.to_categorical(y_test, num_classes)
 
-# Define ResNet50 model
+# Define ResNet50 model with Elastic Net regularization (L1 and L2)
 base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(target_size[0], target_size[1], 3))
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
 x = BatchNormalization()(x)
-x = Dropout(0.5)(x)
-x = Dense(1024, activation='relu')(x)
+x = Dropout(0.7)(x)  # Increase dropout rate to 0.7
+# Add L1-L2 regularization to the Dense layer
+x = Dense(1024, activation='relu', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
 x = BatchNormalization()(x)
-x = Dropout(0.5)(x)
-predictions = Dense(num_classes, activation='softmax')(x)
+x = Dropout(0.7)(x)  # Increase dropout rate to 0.7
+# Add L1-L2 regularization to the output layer as well
+predictions = Dense(num_classes, activation='softmax', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
 
 # Final model
 model = Model(inputs=base_model.input, outputs=predictions)
@@ -91,10 +94,10 @@ try:
 except Exception as e:
     print('Exception occurred: ', str(e))
 
-# Save the final model
-model.save('final_model.h5')
+# Load the best model
+model.load_weights('best_model.h5')
 
-# Evaluate model
+# Evaluate model on test set
 predictions = model.predict(X_test)
 predicted_classes = np.argmax(predictions, axis=1)
 true_classes = np.argmax(y_test, axis=1)
@@ -126,28 +129,36 @@ plt.xlabel('Epoch')
 plt.legend(['Train', 'Test'], loc='upper left')
 
 plt.show()
-
-# SVM 分类器
-# Feature extraction for SVM
+# Random Forest classifier
+# Feature extraction for Random Forest
 feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv5_block3_out').output)
 
 # Extract features
 train_features = feature_extractor.predict(X_train)
 test_features = feature_extractor.predict(X_test)
 
-# Reshape features for SVM compatibility
+# Reshape features for Random Forest compatibility
 train_features = np.reshape(train_features, (train_features.shape[0], -1))
 test_features = np.reshape(test_features, (test_features.shape[0], -1))
 
-# Train SVM classifier
-svm_classifier = SVC(kernel='rbf', C=1.0, gamma='auto')
-svm_classifier.fit(train_features, np.argmax(y_train, axis=1))
+rf_classifier = RandomForestClassifier(
+    n_estimators=200,            # 树的数量
+    max_depth=30,                # 树的最大深度
+    min_samples_split=10,        # 内部节点再划分所需最小样本数
+    min_samples_leaf=8,          # 叶子节点最少样本数
+    max_features='sqrt',         # 寻找最佳分割时考虑的最大特征数
+    bootstrap=False,             # 是否使用bootstrap样本
+    class_weight='balanced',     # 类别权重
+    random_state=80            # 随机种子
+)
 
-# Evaluate SVM classifier
-svm_predictions = svm_classifier.predict(test_features)
-svm_accuracy = accuracy_score(np.argmax(y_test, axis=1), svm_predictions)
-svm_f1 = f1_score(np.argmax(y_test, axis=1), svm_predictions, average='weighted')
+# 训练随机森林分类器
+rf_classifier.fit(train_features, np.argmax(y_train, axis=1))
 
-print(f'SVM Confusion Matrix:\n{confusion_matrix(np.argmax(y_test, axis=1), svm_predictions)}')
-print(f'SVM Accuracy: {svm_accuracy}')
-print(f'SVM F1 Score: {svm_f1}')
+# 评估随机森林分类器
+rf_predictions = rf_classifier.predict(test_features)
+rf_accuracy = accuracy_score(np.argmax(y_test, axis=1), rf_predictions)
+rf_f1 = f1_score(np.argmax(y_test, axis=1), rf_predictions, average='weighted')
+print(f'Random Forest Confusion Matrix:\n{confusion_matrix(np.argmax(y_test, axis=1), rf_predictions)}')
+print(f'Random Forest Accuracy: {rf_accuracy}')
+print(f'Random Forest F1 Score: {rf_f1}')

@@ -2,10 +2,11 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout, Multiply, Reshape
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.regularizers import l1_l2
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
@@ -66,6 +67,31 @@ X_test = np.array([preprocess_image(img) for img in X_test])
 y_train = tf.keras.utils.to_categorical(y_train, num_classes)
 y_test = tf.keras.utils.to_categorical(y_test, num_classes)
 
+# Perform data augmentation
+datagen = ImageDataGenerator(
+    rotation_range=10,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    zoom_range=0.1,
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+# Fit the ImageDataGenerator to the training data
+datagen.fit(X_train)
+
+# Augment the training data by using the ImageDataGenerator
+augmented_data = datagen.flow(X_train, y_train, batch_size=batch_size)
+
+# Combine the original and augmented data
+X_train_augmented = np.concatenate([X_train, augmented_data[0][0]])
+y_train_augmented = np.concatenate([y_train, augmented_data[0][1]])
+
+# Recompute class weights for the combined dataset
+sample_weights_augmented = compute_sample_weight(class_weight='balanced', y=np.argmax(y_train_augmented, axis=1))
+
+
 # Define ResNet50 model with Elastic Net regularization (L1 and L2)
 base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(target_size[0], target_size[1], 3))
 x = base_model.output
@@ -90,7 +116,13 @@ model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), l
 
 # Train model with the checkpoint callback
 try:
-    history = model.fit(X_train, y_train, epochs=num_epochs, validation_data=(X_test, y_test), sample_weight=sample_weights, callbacks=[checkpoint])
+    history = model.fit(
+        X_train_augmented, y_train_augmented,
+        sample_weight=sample_weights_augmented,
+        epochs=num_epochs,
+        validation_data=(X_test, y_test),
+        callbacks=[checkpoint]
+    )
 except Exception as e:
     print('Exception occurred: ', str(e))
 

@@ -58,9 +58,9 @@ images, proba, types = load_dataset()
 def map_probability_to_class(prob):
     if prob == 0:
         return 0
-    elif prob <= 0.33:
+    elif prob <= 0.34:
         return 1
-    elif prob <= 0.67:
+    elif prob <= 0.68:
         return 2
     else:
         return 3

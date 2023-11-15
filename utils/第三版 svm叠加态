@@ -33,24 +33,23 @@ data_csv_path = 'labels.csv'
 image_directory = './images'
 batch_size = 64
 target_size = (224, 224)
-num_epochs = 10
+num_epochs = 50
 num_classes = 4  # 修改为四个类别
-learning_rate = 0.0001
+learning_rate = 0.00001
 
 # Load dataset
 images, proba, types = load_dataset()
 
 # Map probabilities to class labels
 def map_probability_to_class(prob):
-    if prob < 0.33:
+    if prob == 0:
         return 0
-    elif prob < 0.67:
+    elif prob <= 0.34:
         return 1
-    elif prob < 1.0:
+    elif prob <= 0.68:
         return 2
     else:
         return 3
-
 # Apply mapping
 probs_mapped = np.array([map_probability_to_class(prob) for prob in proba])
 
@@ -153,6 +152,9 @@ plt.xlabel('Epoch')
 plt.legend(['Train', 'Test'], loc='upper left')
 
 plt.show()
+# 定义特征提取器为 ResNet50 的最后一个卷积层的输出
+feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv5_block3_out').output)
+
 
 # SVM 分类器
 # 交叉验证参数

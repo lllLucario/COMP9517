@@ -16,6 +16,7 @@ from sklearn.linear_model import LogisticRegression
 from matplotlib import pyplot as plt
 from elpv_reader import load_dataset
 from PIL import Image, ImageEnhance, ImageFilter
+from sklearn.decomposition import PCA
 import os
 
 # SE Block definition
@@ -35,7 +36,7 @@ batch_size = 64
 target_size = (224, 224)
 num_epochs = 50
 num_classes = 4  # 修改为四个类别
-learning_rate = 0.00001
+learning_rate = 0.0001
 
 # Load dataset
 images, proba, types = load_dataset()
@@ -152,28 +153,21 @@ plt.xlabel('Epoch')
 plt.legend(['Train', 'Test'], loc='upper left')
 
 plt.show()
-# 定义特征提取器为 ResNet50 的最后一个卷积层的输出
-feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv5_block3_out').output)
-
-
-# SVM 分类器
-# 交叉验证参数
-resnet_test_predictions = model.predict(X_test)
-resnet_test_classes = np.argmax(resnet_test_predictions, axis=1)
-
-# 初始化用于保存交叉验证预测的数组
-svm_cv_predictions = np.zeros(len(X_test))
+## 定义特征提取器为 ResNet50 的最后一个卷积层的输出
+feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv4_block6_out').output)
 
 # 交叉验证
 n_splits = 5
 kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 svm_accuracies = []
-svm_cv_predictions = np.zeros(len(X_test))
 
-for train_index, test_index in kf.split(X_train):
+# 初始化数组以保存交叉验证期间的 SVM 预测
+svm_cv_predictions_full = np.zeros(len(X_train))
+
+for train_index, val_index in kf.split(X_train):
     # 分割数据
-    X_train_fold, X_val_fold = X_train[train_index], X_train[test_index]
-    y_train_fold, y_val_fold = y_train[train_index], y_train[test_index]
+    X_train_fold, X_val_fold = X_train[train_index], X_train[val_index]
+    y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
 
     # 特征提取
     train_features = feature_extractor.predict(X_train_fold)
@@ -181,12 +175,20 @@ for train_index, test_index in kf.split(X_train):
     val_features = feature_extractor.predict(X_val_fold)
     val_features = np.reshape(val_features, (val_features.shape[0], -1))
 
+    # 在训练 SVM 分类器之前进行 PCA 降维
+    pca = PCA(n_components=200)  # 例如，降维到200个主成分
+    train_features_pca = pca.fit_transform(train_features)
+    val_features_pca = pca.transform(val_features)
+
     # 训练 SVM 分类器
     svm_classifier = SVC(kernel='rbf', C=1.0, gamma='auto')
-    svm_classifier.fit(train_features, np.argmax(y_train_fold, axis=1))
+    svm_classifier.fit(train_features_pca, np.argmax(y_train_fold, axis=1))
 
     # 在验证集上预测
-    svm_val_predictions = svm_classifier.predict(val_features)
+    svm_val_predictions = svm_classifier.predict(val_features_pca)
+
+    # 存储每个折叠的验证集预测
+    svm_cv_predictions_full[val_index] = svm_val_predictions
 
     # 获取一维数组格式的标签
     y_val_fold_labels = np.argmax(y_val_fold, axis=1)
@@ -196,8 +198,18 @@ for train_index, test_index in kf.split(X_train):
 
     svm_accuracies.append(svm_accuracy)
 
+# 输出平均性能指标
+print(f'SVM Average Accuracy: {np.mean(svm_accuracies)}')
+
+# 获取深度学习模型在测试集上的预测
+resnet_test_predictions = model.predict(X_test)
+resnet_test_classes = np.argmax(resnet_test_predictions, axis=1)
+
 # 创建元数据集
-meta_features = np.vstack([resnet_test_classes, svm_cv_predictions]).T
+# 这里需要根据您的具体实现来获取与 X_test 对应的索引
+# 示例：如果 X_test 是从 X_train 分割出来的最后 25%，则可按照以下方式操作
+test_indices = range(len(X_train) - len(X_test), len(X_train))
+meta_features = np.vstack([resnet_test_classes, svm_cv_predictions_full[test_indices]]).T
 
 # 训练逻辑回归元模型
 meta_model = LogisticRegression()

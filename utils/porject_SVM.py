@@ -1,36 +1,20 @@
+import os
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout
-from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import ModelCheckpoint
-from sklearn.svm import SVC  # 导入SVM
-from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
-from sklearn.model_selection import KFold
-
-from sklearn.model_selection import train_test_split
-from sklearn.utils.class_weight import compute_sample_weight
-from matplotlib import pyplot as plt
-from elpv_reader import load_dataset
 from PIL import Image, ImageEnhance, ImageFilter
-import numpy as np
-import pandas as pd
-import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, BatchNormalization, Dropout, Multiply, Reshape
+from tensorflow.keras.layers import (GlobalAveragePooling2D, Dense, BatchNormalization,
+                                     Dropout, Multiply, Reshape)
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.regularizers import l1_l2
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, KFold
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
-from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_sample_weight
+from sklearn.svm import SVC
 from matplotlib import pyplot as plt
-from elpv_reader import load_dataset
-from PIL import Image, ImageEnhance, ImageFilter
-import os
-import os
+from elpv_reader import load_dataset  # Assuming this is a custom module
 
 # SE Block definition
 def se_block(input_feature, ratio=16):
@@ -71,6 +55,12 @@ probs_mapped = np.array([map_probability_to_class(prob) for prob in proba])
 # Split data
 X_train, X_test, y_train, y_test = train_test_split(images, probs_mapped, test_size=0.25, stratify=probs_mapped)
 
+# Split test set further into mono and poly
+X_test_mono = [X_test[i] for i in range(len(X_test)) if types[i] == 'mono']
+y_test_mono = [y_test[i] for i in range(len(y_test)) if types[i] == 'mono']
+X_test_poly = [X_test[i] for i in range(len(X_test)) if types[i] == 'poly']
+y_test_poly = [y_test[i] for i in range(len(y_test)) if types[i] == 'poly']
+
 # Compute class weights
 sample_weights = compute_sample_weight(class_weight='balanced', y=y_train)
 
@@ -88,10 +78,14 @@ def preprocess_image(image):
 # Apply preprocessing to the images
 X_train = np.array([preprocess_image(img) for img in X_train])
 X_test = np.array([preprocess_image(img) for img in X_test])
+X_test_mono = np.array([preprocess_image(img) for img in X_test_mono])
+X_test_poly = np.array([preprocess_image(img) for img in X_test_poly])
 
-# Ensure labels are in one-hot encoded format
-y_train = tf.keras.utils.to_categorical(y_train, num_classes)
-y_test = tf.keras.utils.to_categorical(y_test, num_classes)
+# Ensure labels are one-hot encoded
+y_train = tf.keras.utils.to_categorical(y_train, 4)
+y_test = tf.keras.utils.to_categorical(y_test, 4)
+y_test_mono = tf.keras.utils.to_categorical(y_test_mono, 4)
+y_test_poly = tf.keras.utils.to_categorical(y_test_poly, 4)
 
 # Define ResNet50 model with Elastic Net regularization (L1 and L2)
 base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(target_size[0], target_size[1], 3))
@@ -99,11 +93,9 @@ x = base_model.output
 x = GlobalAveragePooling2D()(x)
 x = BatchNormalization()(x)
 x = Dropout(0.7)(x)  # Increase dropout rate to 0.7
-# Add L1-L2 regularization to the Dense layer
 x = Dense(1024, activation='relu', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
 x = BatchNormalization()(x)
 x = Dropout(0.7)(x)  # Increase dropout rate to 0.7
-# Add L1-L2 regularization to the output layer as well
 predictions = Dense(num_classes, activation='softmax', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
 
 # Final model
@@ -116,70 +108,87 @@ checkpoint = ModelCheckpoint('best_model.h5', monitor='val_loss', verbose=1, sav
 model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), loss='categorical_crossentropy', metrics=['accuracy'])
 
 # Train model with the checkpoint callback
+history = None
 try:
     history = model.fit(X_train, y_train, epochs=num_epochs, validation_data=(X_test, y_test), sample_weight=sample_weights, callbacks=[checkpoint])
 except Exception as e:
-    print('Exception occurred: ', str(e))
+    print('Exception occurred during training: ', str(e))
 
 # Load the best model
 model.load_weights('best_model.h5')
 
-# Evaluate model on test set
-predictions = model.predict(X_test)
-predicted_classes = np.argmax(predictions, axis=1)
-true_classes = np.argmax(y_test, axis=1)
-conf_matrix = confusion_matrix(true_classes, predicted_classes)
-accuracy = accuracy_score(true_classes, predicted_classes)
-f1 = f1_score(true_classes, predicted_classes, average='weighted')
+# Evaluate model
+def evaluate_model(model, X_test, y_test):
+    predictions = model.predict(X_test)
+    predicted_classes = np.argmax(predictions, axis=1)
+    true_classes = np.argmax(y_test, axis=1)
+    conf_matrix = confusion_matrix(true_classes, predicted_classes)
+    accuracy = accuracy_score(true_classes, predicted_classes)
+    f1 = f1_score(true_classes, predicted_classes, average='weighted')
 
-print(f'Confusion Matrix:\n{conf_matrix}')
-print(f'Accuracy: {accuracy}')
-print(f'F1 Score: {f1}')
+    print(f'Confusion Matrix:\n{conf_matrix}')
+    print(f'Accuracy: {accuracy}')
+    print(f'F1 Score: {f1}')
 
-# Plot training & validation accuracy values
-plt.figure(figsize=(12, 4))
-plt.subplot(1, 2, 1)
-plt.plot(history.history['accuracy'])
-plt.plot(history.history['val_accuracy'])
-plt.title('Model Accuracy')
-plt.ylabel('Accuracy')
-plt.xlabel('Epoch')
-plt.legend(['Train', 'Test'], loc='upper left')
+# Evaluate on different subsets
+print("Evaluating on Mixed Data (Mono and Poly):")
+evaluate_model(model, X_test, y_test)
 
-# Plot training & validation loss values
-plt.subplot(1, 2, 2)
-plt.plot(history.history['loss'])
-plt.plot(history.history['val_loss'])
-plt.title('Model Loss')
-plt.ylabel('Loss')
-plt.xlabel('Epoch')
-plt.legend(['Train', 'Test'], loc='upper left')
+print("\nEvaluating on Mono Data:")
+evaluate_model(model, X_test_mono, y_test_mono)
 
-plt.show()
-# SVM 分类器
-# 交叉验证参数
+print("\nEvaluating on Poly Data:")
+evaluate_model(model, X_test_poly, y_test_poly)
+
+# Plot training & validation accuracy and loss values
+if history:
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['accuracy'])
+    plt.plot(history.history['val_accuracy'])
+    plt.title('Model Accuracy')
+    plt.ylabel('Accuracy')
+    plt.xlabel('Epoch')
+    plt.legend(['Train', 'Test'], loc='upper left')
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['loss'])
+    plt.plot(history.history['val_loss'])
+    plt.title('Model Loss')
+    plt.ylabel('Loss')
+    plt.xlabel('Epoch')
+    plt.legend(['Train', 'Test'], loc='upper left')
+    plt.show()
+
+# SVM Classifier with KFold Cross-Validation
 n_splits = 5
 kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
-# 用于存储交叉验证结果的列表
 svm_accuracies = []
 svm_f1_scores = []
 
-# 特征提取
+# ... [前面的代码，包括模型训练等] ...
+
+# Feature extraction for SVM
 feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv5_block3_out').output)
 train_features = feature_extractor.predict(X_train)
 train_features = np.reshape(train_features, (train_features.shape[0], -1))
 
-# 交叉验证
+# SVM Classifier with KFold Cross-Validation
+n_splits = 5
+kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+svm_accuracies = []
+svm_f1_scores = []
+
+# KFold Cross-Validation
 for train_index, val_index in kf.split(train_features):
     X_train_fold, X_val_fold = train_features[train_index], train_features[val_index]
     y_train_fold, y_val_fold = np.argmax(y_train, axis=1)[train_index], np.argmax(y_train, axis=1)[val_index]
 
-    # 训练 SVM 分类器
     svm_classifier = SVC(kernel='rbf', C=1.0, gamma='auto')
     svm_classifier.fit(X_train_fold, y_train_fold)
 
-    # 在验证集上评估 SVM 分类器
     svm_predictions = svm_classifier.predict(X_val_fold)
     svm_accuracy = accuracy_score(y_val_fold, svm_predictions)
     svm_f1 = f1_score(y_val_fold, svm_predictions, average='weighted')
@@ -187,6 +196,38 @@ for train_index, val_index in kf.split(train_features):
     svm_accuracies.append(svm_accuracy)
     svm_f1_scores.append(svm_f1)
 
-# 输出平均性能指标
 print(f'SVM Average Accuracy: {np.mean(svm_accuracies)}')
 print(f'SVM Average F1 Score: {np.mean(svm_f1_scores)}')
+
+# Train SVM Classifier on entire training set for final evaluation
+svm_classifier.fit(train_features, np.argmax(y_train, axis=1))
+
+# Extract features for each test set
+test_features = feature_extractor.predict(X_test)
+test_features = np.reshape(test_features, (test_features.shape[0], -1))
+
+test_features_mono = feature_extractor.predict(X_test_mono)
+test_features_mono = np.reshape(test_features_mono, (test_features_mono.shape[0], -1))
+
+test_features_poly = feature_extractor.predict(X_test_poly)
+test_features_poly = np.reshape(test_features_poly, (test_features_poly.shape[0], -1))
+
+# Evaluate SVM Classifier
+def evaluate_svm(svm_classifier, features, labels):
+    svm_predictions = svm_classifier.predict(features)
+    accuracy = accuracy_score(labels, svm_predictions)
+    f1 = f1_score(labels, svm_predictions, average='weighted')
+    conf_matrix = confusion_matrix(labels, svm_predictions)
+
+    print(f'Confusion Matrix:\n{conf_matrix}')
+    print(f'Accuracy: {accuracy}')
+    print(f'F1 Score: {f1}')
+
+print("Evaluating SVM on Mixed Data (Mono and Poly):")
+evaluate_svm(svm_classifier, test_features, np.argmax(y_test, axis=1))
+
+print("\nEvaluating SVM on Mono Data:")
+evaluate_svm(svm_classifier, test_features_mono, np.argmax(y_test_mono, axis=1))
+
+print("\nEvaluating SVM on Poly Data:")
+evaluate_svm(svm_classifier, test_features_poly, np.argmax(y_test_poly, axis=1))

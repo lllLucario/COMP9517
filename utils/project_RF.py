@@ -46,6 +46,12 @@ X_train, X_test, y_train, y_test = train_test_split(
     images, probs_mapped, test_size=0.25, stratify=probs_mapped, random_state=None
 )
 
+# Split test set further into mono and poly
+X_test_mono = [X_test[i] for i in range(len(X_test)) if types[i] == 'mono']
+y_test_mono = [y_test[i] for i in range(len(y_test)) if types[i] == 'mono']
+X_test_poly = [X_test[i] for i in range(len(X_test)) if types[i] == 'poly']
+y_test_poly = [y_test[i] for i in range(len(y_test)) if types[i] == 'poly']
+
 # Compute class weights for balanced training
 sample_weights = compute_sample_weight(class_weight='balanced', y=y_train)
 
@@ -60,13 +66,17 @@ def preprocess_image(image):
     img_array = np.array(img) / 255.0
     return img_array
 
-# Preprocess training and test images
+# Apply preprocessing to the images
 X_train = np.array([preprocess_image(img) for img in X_train])
 X_test = np.array([preprocess_image(img) for img in X_test])
+X_test_mono = np.array([preprocess_image(img) for img in X_test_mono])
+X_test_poly = np.array([preprocess_image(img) for img in X_test_poly])
 
-# One-hot encode labels
-y_train = tf.keras.utils.to_categorical(y_train, num_classes)
-y_test = tf.keras.utils.to_categorical(y_test, num_classes)
+# Ensure labels are one-hot encoded
+y_train = tf.keras.utils.to_categorical(y_train, 4)
+y_test = tf.keras.utils.to_categorical(y_test, 4)
+y_test_mono = tf.keras.utils.to_categorical(y_test_mono, 4)
+y_test_poly = tf.keras.utils.to_categorical(y_test_poly, 4)
 
 # Data augmentation settings
 datagen = ImageDataGenerator(
@@ -131,18 +141,27 @@ except Exception as e:
 # Load the best model
 model.load_weights('best_model.h5')
 
-# Evaluate the model on the test set
-predictions = model.predict(X_test)
-predicted_classes = np.argmax(predictions, axis=1)
-true_classes = np.argmax(y_test, axis=1)
-conf_matrix = confusion_matrix(true_classes, predicted_classes)
-accuracy = accuracy_score(true_classes, predicted_classes)
-f1 = f1_score(true_classes, predicted_classes, average='weighted')
+def evaluate_model(model, X_test, y_test):
+    predictions = model.predict(X_test)
+    predicted_classes = np.argmax(predictions, axis=1)
+    true_classes = np.argmax(y_test, axis=1)
+    conf_matrix = confusion_matrix(true_classes, predicted_classes)
+    accuracy = accuracy_score(true_classes, predicted_classes)
+    f1 = f1_score(true_classes, predicted_classes, average='weighted')
 
-# Print model evaluation metrics
-print(f'Confusion Matrix:\n{conf_matrix}')
-print(f'Accuracy: {accuracy}')
-print(f'F1 Score: {f1}')
+    print(f'Confusion Matrix:\n{conf_matrix}')
+    print(f'Accuracy: {accuracy}')
+    print(f'F1 Score: {f1}')
+
+# Evaluate on different subsets
+print("Evaluating on Mixed Data (Mono and Poly):")
+evaluate_model(model, X_test, y_test)
+
+print("\nEvaluating on Mono Data:")
+evaluate_model(model, X_test_mono, y_test_mono)
+
+print("\nEvaluating on Poly Data:")
+evaluate_model(model, X_test_poly, y_test_poly)
 
 # Plot training and validation accuracy and loss
 plt.figure(figsize=(12, 4))
@@ -169,13 +188,16 @@ feature_extractor = Model(
     inputs=base_model.input, outputs=base_model.get_layer('conv5_block3_out').output
 )
 
-# Extract features
+# Extract features and reshape
 train_features = feature_extractor.predict(X_train)
-test_features = feature_extractor.predict(X_test)
-
-# Reshape features for Random Forest compatibility
 train_features = np.reshape(train_features, (train_features.shape[0], -1))
+test_features = feature_extractor.predict(X_test)
 test_features = np.reshape(test_features, (test_features.shape[0], -1))
+test_features_mono = feature_extractor.predict(X_test_mono)
+test_features_mono = np.reshape(test_features_mono, (test_features_mono.shape[0], -1))
+test_features_poly = feature_extractor.predict(X_test_poly)
+test_features_poly = np.reshape(test_features_poly, (test_features_poly.shape[0], -1))
+
 
 # Random Forest classifier settings
 rf_classifier = RandomForestClassifier(
@@ -192,12 +214,22 @@ rf_classifier = RandomForestClassifier(
 # Train the Random Forest classifier
 rf_classifier.fit(train_features, np.argmax(y_train, axis=1))
 
-# Evaluate the Random Forest classifier
-rf_predictions = rf_classifier.predict(test_features)
-rf_accuracy = accuracy_score(np.argmax(y_test, axis=1), rf_predictions)
-rf_f1 = f1_score(np.argmax(y_test, axis=1), rf_predictions, average='weighted')
+# Evaluate the Random Forest classifier on mono and poly data
+def evaluate_rf(rf_classifier, features, labels):
+    rf_predictions = rf_classifier.predict(features)
+    rf_accuracy = accuracy_score(labels, rf_predictions)
+    rf_f1 = f1_score(labels, rf_predictions, average='weighted')
+    rf_conf_matrix = confusion_matrix(labels, rf_predictions)
 
-# Print Random Forest classifier evaluation metrics
-print(f'Random Forest Confusion Matrix:\n{confusion_matrix(np.argmax(y_test, axis=1), rf_predictions)}')
-print(f'Random Forest Accuracy: {rf_accuracy}')
-print(f'Random Forest F1 Score: {rf_f1}')
+    print(f'Confusion Matrix:\n{rf_conf_matrix}')
+    print(f'Accuracy: {rf_accuracy}')
+    print(f'F1 Score: {rf_f1}')
+
+print("\nEvaluating Random Forest on Mixed Data (Mono and Poly):")
+evaluate_rf(rf_classifier, test_features, np.argmax(y_test, axis=1))
+
+print("\nEvaluating Random Forest on Mono Data:")
+evaluate_rf(rf_classifier, test_features_mono, np.argmax(y_test_mono, axis=1))
+
+print("\nEvaluating Random Forest on Poly Data:")
+evaluate_rf(rf_classifier, test_features_poly, np.argmax(y_test_poly, axis=1))

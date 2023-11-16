@@ -53,7 +53,9 @@ def map_probability_to_class(prob):
 probs_mapped = np.array([map_probability_to_class(prob) for prob in proba])
 
 # Split data
-X_train, X_test, y_train, y_test = train_test_split(images, probs_mapped, test_size=0.25, stratify=probs_mapped)
+X_train, X_test, y_train, y_test = train_test_split(
+    images, probs_mapped, test_size=0.25, stratify=probs_mapped, random_state=None
+)
 
 # Split test set further into mono and poly
 X_test_mono = [X_test[i] for i in range(len(X_test)) if types[i] == 'mono']

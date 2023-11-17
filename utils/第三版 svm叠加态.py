@@ -34,7 +34,7 @@ data_csv_path = 'labels.csv'
 image_directory = './images'
 batch_size = 64
 target_size = (224, 224)
-num_epochs = 50
+num_epochs = 80
 num_classes = 4  # 修改为四个类别
 learning_rate = 0.0001
 
@@ -51,16 +51,27 @@ def map_probability_to_class(prob):
         return 2
     else:
         return 3
-# Apply mapping
+# Apply mapping (as before)
 probs_mapped = np.array([map_probability_to_class(prob) for prob in proba])
 
-# 分割数据集为单晶、多晶和混合
-X_mono, y_mono = images[types == 'mono'], probs_mapped[types == 'mono']
-X_poly, y_poly = images[types == 'poly'], probs_mapped[types == 'poly']
-X_mixed, y_mixed = images, probs_mapped
+# Split the dataset into mono and poly (or other types if applicable)
+X_mono = images[types == 'mono']
+y_mono = probs_mapped[types == 'mono']
+X_poly = images[types == 'poly']
+y_poly = probs_mapped[types == 'poly']
 
-# Split data for mixed types
-X_train, X_test, y_train, y_test = train_test_split(X_mixed, y_mixed, test_size=0.25, stratify=y_mixed)
+# Now, split each subset into training and testing sets
+X_train_mono, X_test_mono, y_train_mono, y_test_mono = train_test_split(
+    X_mono, y_mono, test_size=0.25, stratify=y_mono, random_state=None)
+
+X_train_poly, X_test_poly, y_train_poly, y_test_poly = train_test_split(
+    X_poly, y_poly, test_size=0.25, stratify=y_poly, random_state=None)
+
+# You can concatenate these subsets if you want a mixed training and test set
+X_train = np.concatenate((X_train_mono, X_train_poly), axis=0)
+y_train = np.concatenate((y_train_mono, y_train_poly), axis=0)
+X_test = np.concatenate((X_test_mono, X_test_poly), axis=0)
+y_test = np.concatenate((y_test_mono, y_test_poly), axis=0)
 
 # Compute class weights
 sample_weights = compute_sample_weight(class_weight='balanced', y=y_train)
@@ -79,19 +90,22 @@ def preprocess_image(image):
 # Apply preprocessing to the images
 X_train = np.array([preprocess_image(img) for img in X_train])
 X_test = np.array([preprocess_image(img) for img in X_test])
+X_test_mono = np.array([preprocess_image(img) for img in X_test_mono])
+X_test_poly = np.array([preprocess_image(img) for img in X_test_poly])
 
-# 确保标签是独热编码格式
+# Ensure labels are one-hot encoded
 y_train = tf.keras.utils.to_categorical(y_train, num_classes)
 y_test = tf.keras.utils.to_categorical(y_test, num_classes)
-
+y_test_mono = tf.keras.utils.to_categorical(y_test_mono, num_classes)
+y_test_poly = tf.keras.utils.to_categorical(y_test_poly, num_classes)
 # 定义 ResNet50 模型，只定义一次
 base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
-x = Dense(1024, activation='relu', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
+x = Dense(2048, activation='relu', kernel_regularizer=l1_l2(l1=0.07, l2=0.08))(x)
 x = BatchNormalization()(x)
 x = Dropout(0.7)(x)
-predictions = Dense(num_classes, activation='softmax', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
+predictions = Dense(num_classes, activation='softmax', kernel_regularizer=l1_l2(l1=0.03, l2=0.03))(x)
 model = Model(inputs=base_model.input, outputs=predictions)
 
 # 编译模型，只编译一次
@@ -121,17 +135,28 @@ except Exception as e:
 # Load the best model
 model.load_weights('best_model.h5')
 
-# Evaluate model on test set
-predictions = model.predict(X_test)
-predicted_classes = np.argmax(predictions, axis=1)
-true_classes = np.argmax(y_test, axis=1)
-conf_matrix = confusion_matrix(true_classes, predicted_classes)
-accuracy = accuracy_score(true_classes, predicted_classes)
-f1 = f1_score(true_classes, predicted_classes, average='weighted')
+# Define a function to evaluate the deep learning model
+def evaluate_model(model, X_test, y_test):
+    predictions = model.predict(X_test)
+    predicted_classes = np.argmax(predictions, axis=1)
+    true_classes = np.argmax(y_test, axis=1)
+    conf_matrix = confusion_matrix(true_classes, predicted_classes)
+    accuracy = accuracy_score(true_classes, predicted_classes)
+    f1 = f1_score(true_classes, predicted_classes, average='weighted')
 
-print(f'Confusion Matrix:\n{conf_matrix}')
-print(f'Accuracy: {accuracy}')
-print(f'F1 Score: {f1}')
+    print(f'Confusion Matrix:\n{conf_matrix}')
+    print(f'Accuracy: {accuracy}')
+    print(f'F1 Score: {f1}')
+
+# Evaluate on different subsets
+print("Evaluating Deep Learning Model on Mixed Data (Mono and Poly):")
+evaluate_model(model, X_test, y_test)
+
+print("\nEvaluating Deep Learning Model on Mono Data:")
+evaluate_model(model, X_test_mono, y_test_mono)
+
+print("\nEvaluating Deep Learning Model on Poly Data:")
+evaluate_model(model, X_test_poly, y_test_poly)
 
 # Plot training & validation accuracy values
 plt.figure(figsize=(12, 4))
@@ -153,75 +178,80 @@ plt.xlabel('Epoch')
 plt.legend(['Train', 'Test'], loc='upper left')
 
 plt.show()
-## 定义特征提取器为 ResNet50 的最后一个卷积层的输出
-feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv4_block6_out').output)
+# SVM Classifier with KFold Cross-Validation and training on the entire set
+# Define feature extractor
+feature_extractor = Model(inputs=base_model.input, outputs=base_model.get_layer('conv5_block3_out').output)
+
+# Feature extraction
+train_features = feature_extractor.predict(X_train)
+train_features = np.reshape(train_features, (train_features.shape[0], -1))
 
 # 交叉验证
 n_splits = 5
 kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 svm_accuracies = []
 
-# 初始化数组以保存交叉验证期间的 SVM 预测
-svm_cv_predictions_full = np.zeros(len(X_train))
+for train_index, val_index in kf.split(train_features):
+    # Split data for this fold
+    X_train_fold, X_val_fold = train_features[train_index], train_features[val_index]
+    y_train_fold, y_val_fold = np.argmax(y_train, axis=1)[train_index], np.argmax(y_train, axis=1)[val_index]
 
-for train_index, val_index in kf.split(X_train):
-    # 分割数据
-    X_train_fold, X_val_fold = X_train[train_index], X_train[val_index]
-    y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
-
-    # 特征提取
-    train_features = feature_extractor.predict(X_train_fold)
-    train_features = np.reshape(train_features, (train_features.shape[0], -1))
-    val_features = feature_extractor.predict(X_val_fold)
-    val_features = np.reshape(val_features, (val_features.shape[0], -1))
-
-    # 在训练 SVM 分类器之前进行 PCA 降维
-    pca = PCA(n_components=200)  # 例如，降维到200个主成分
-    train_features_pca = pca.fit_transform(train_features)
-    val_features_pca = pca.transform(val_features)
-
-    # 训练 SVM 分类器
+    # Train SVM Classifier
     svm_classifier = SVC(kernel='rbf', C=1.0, gamma='auto')
-    svm_classifier.fit(train_features_pca, np.argmax(y_train_fold, axis=1))
+    svm_classifier.fit(X_train_fold, y_train_fold)
 
-    # 在验证集上预测
-    svm_val_predictions = svm_classifier.predict(val_features_pca)
-
-    # 存储每个折叠的验证集预测
-    svm_cv_predictions_full[val_index] = svm_val_predictions
-
-    # 获取一维数组格式的标签
-    y_val_fold_labels = np.argmax(y_val_fold, axis=1)
-
-    # 计算并存储 SVM 准确率
-    svm_accuracy = accuracy_score(y_val_fold_labels, svm_val_predictions)
-
+    # Evaluate SVM Classifier
+    svm_predictions = svm_classifier.predict(X_val_fold)
+    svm_accuracy = accuracy_score(y_val_fold, svm_predictions)
     svm_accuracies.append(svm_accuracy)
 
-# 输出平均性能指标
-print(f'SVM Average Accuracy: {np.mean(svm_accuracies)}')
+# Train SVM Classifier on entire training set for final evaluation
+svm_classifier.fit(train_features, np.argmax(y_train, axis=1))
 
-# 获取深度学习模型在测试集上的预测
+# Extract features for each test set
+test_features = feature_extractor.predict(X_test)
+test_features = np.reshape(test_features, (test_features.shape[0], -1))
+test_features_mono = feature_extractor.predict(X_test_mono)
+test_features_mono = np.reshape(test_features_mono, (test_features_mono.shape[0], -1))
+test_features_poly = feature_extractor.predict(X_test_poly)
+test_features_poly = np.reshape(test_features_poly, (test_features_poly.shape[0], -1))
+
+# Define a function to evaluate SVM
+def evaluate_svm(svm_classifier, features, labels):
+    svm_predictions = svm_classifier.predict(features)
+    labels = np.argmax(labels, axis=1)  # Convert one-hot to label
+    accuracy = accuracy_score(labels, svm_predictions)
+    f1 = f1_score(labels, svm_predictions, average='weighted')
+    conf_matrix = confusion_matrix(labels, svm_predictions)
+
+    print(f'Confusion Matrix:\n{conf_matrix}')
+    print(f'Accuracy: {accuracy}')
+    print(f'F1 Score: {f1}')
+
+# Evaluate SVM on different subsets
+print("Evaluating SVM on Mixed Data (Mono and Poly):")
+evaluate_svm(svm_classifier, test_features, y_test)
+
+print("\nEvaluating SVM on Mono Data:")
+evaluate_svm(svm_classifier, test_features_mono, y_test_mono)
+
+print("\nEvaluating SVM on Poly Data:")
+evaluate_svm(svm_classifier, test_features_poly, y_test_poly)
+# Creating the meta-dataset
 resnet_test_predictions = model.predict(X_test)
 resnet_test_classes = np.argmax(resnet_test_predictions, axis=1)
+svm_test_predictions = svm_classifier.predict(test_features)
+meta_features = np.vstack([resnet_test_classes, svm_test_predictions]).T
 
-# 创建元数据集
-# 这里需要根据您的具体实现来获取与 X_test 对应的索引
-# 示例：如果 X_test 是从 X_train 分割出来的最后 25%，则可按照以下方式操作
-test_indices = range(len(X_train) - len(X_test), len(X_train))
-meta_features = np.vstack([resnet_test_classes, svm_cv_predictions_full[test_indices]]).T
-
-# 训练逻辑回归元模型
+# Train logistic regression meta model
 meta_model = LogisticRegression()
 meta_model.fit(meta_features, np.argmax(y_test, axis=1))
 
-# 对测试集进行最终预测
+# Make final predictions on test set
 final_predictions = meta_model.predict(meta_features)
 
-# 性能评估
+# Evaluate final predictions
 final_accuracy = accuracy_score(np.argmax(y_test, axis=1), final_predictions)
 final_f1 = f1_score(np.argmax(y_test, axis=1), final_predictions, average='weighted')
-
-# 输出平均性能指标
-print(f'Final Accuracy: {final_accuracy}')
-print(f'Final F1 Score: {final_f1}')
+print(f'Final Meta-Model Accuracy: {final_accuracy}')
+print(f'Final Meta-Model F1 Score: {final_f1}')

@@ -6,6 +6,8 @@ from PIL import Image, ImageEnhance, ImageFilter
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.layers import (GlobalAveragePooling2D, Dense, BatchNormalization,
                                      Dropout, Multiply, Reshape)
+from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
+
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.regularizers import l1_l2
@@ -15,7 +17,7 @@ from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.svm import SVC
 from matplotlib import pyplot as plt
 from elpv_reader import load_dataset  # Assuming this is a custom module
-
+import  random
 # SE Block definition
 def se_block(input_feature, ratio=16):
     channel_axis = -1
@@ -31,9 +33,11 @@ data_csv_path = 'labels.csv'
 image_directory = './images'
 batch_size = 64
 target_size = (224, 224)
-num_epochs = 50
+num_epochs = 80
 num_classes = 4
 learning_rate = 0.0001
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=0.00001, verbose=1)
+
 
 # Load dataset
 images, proba, types = load_dataset()
@@ -53,9 +57,7 @@ def map_probability_to_class(prob):
 probs_mapped = np.array([map_probability_to_class(prob) for prob in proba])
 
 # Split data
-X_train, X_test, y_train, y_test = train_test_split(
-    images, probs_mapped, test_size=0.25, stratify=probs_mapped, random_state=None
-)
+X_train, X_test, y_train, y_test = train_test_split(images, probs_mapped, test_size=0.25, stratify=probs_mapped)
 
 # Split test set further into mono and poly
 X_test_mono = [X_test[i] for i in range(len(X_test)) if types[i] == 'mono']
@@ -71,6 +73,15 @@ def preprocess_image(image):
     img = Image.fromarray(image)
     if img.mode == 'L':
         img = img.convert('RGB')
+
+    # Adjust contrast
+    contrast_factor = random.uniform(0.5, 1.5)
+    img = ImageEnhance.Contrast(img).enhance(contrast_factor)
+
+    # Adjust brightness
+    brightness_factor = random.uniform(0.65, 1.35)
+    img = ImageEnhance.Brightness(img).enhance(brightness_factor)
+
     img = ImageEnhance.Contrast(img).enhance(2)
     img = img.filter(ImageFilter.MedianFilter(size=3))
     img = img.resize(target_size)
@@ -95,7 +106,7 @@ x = base_model.output
 x = GlobalAveragePooling2D()(x)
 x = BatchNormalization()(x)
 x = Dropout(0.7)(x)  # Increase dropout rate to 0.7
-x = Dense(1024, activation='relu', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
+x = Dense(2048, activation='relu', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
 x = BatchNormalization()(x)
 x = Dropout(0.7)(x)  # Increase dropout rate to 0.7
 predictions = Dense(num_classes, activation='softmax', kernel_regularizer=l1_l2(l1=0.01, l2=0.01))(x)
@@ -112,7 +123,8 @@ model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), l
 # Train model with the checkpoint callback
 history = None
 try:
-    history = model.fit(X_train, y_train, epochs=num_epochs, validation_data=(X_test, y_test), sample_weight=sample_weights, callbacks=[checkpoint])
+    history = model.fit(X_train, y_train, epochs=num_epochs, validation_data=(X_test, y_test),
+                        sample_weight=sample_weights, callbacks=[checkpoint, reduce_lr])
 except Exception as e:
     print('Exception occurred during training: ', str(e))
 
